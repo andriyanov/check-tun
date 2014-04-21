@@ -1,0 +1,48 @@
+check-tun is a user-space daemon that encapsulates packets
+captured through netfilter-nfqueue to the configured
+destinations based on fwmark on the packet.
+
+Why do you need it? Say you have a tunnel VS configured
+in your IPVS and you are using keepalived to check your
+real servers to make sure they can handle requests to
+that service. To be 100% sure that there could be no case
+when the check succeeds, but the requests been dropped, you
+need to make the check's and the request's packet flows
+identical. So, checker packets for all the real servers must
+be addressed to the same virtual IP of the service and be
+tunneled to the proper real server.
+
+The check-tun daemon helps to accomplish this. You need to
+setup your keepalived to mark the checks for each RS with the
+unique fwmark, and destine all the checks to the same virtual IP,
+like this:
+
+virtual_server 10.20.0.1 80 {
+	lvs_method TUN
+	protocol TCP
+
+	real_server 10.0.0.1 80 {
+		TCP_CHECK {
+			connect_ip 10.20.0.1
+			fwmark 1
+		}
+	}
+	real_server 10.0.0.2 80 {
+		TCP_CHECK {
+			connect_ip 10.20.0.1
+			fwmark 2
+		}
+	}
+}
+
+check-tun daemon is configured with the original configuration
+file of keepalived (http://www.keepalived.org). <real_server>
+and <fwmark> configuration directives are considered. Run the
+daemon with the keepalived config path specified:
+# check-tun -d /etc/keepalived/keepalived.conf
+
+Then redirect all the outgoing marked packets to the NFQUEUE:
+# iptables -A OUTPUT -m mark ! --mark 0 -j NFQUEUE
+
+Voila, packets to 10.20.0.1 are tunneled to the 10.0.0.1, 10.0.0.2
+based on packet's fwmarks.
