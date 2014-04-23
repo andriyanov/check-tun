@@ -24,7 +24,6 @@
 #include <errno.h>
 #include <syslog.h>
 
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter.h>	    /* for NF_DROP */
 #include <libnetfilter_queue/libnetfilter_queue.h>
@@ -41,6 +40,7 @@ static struct nfnl_handle *nh;
 static char buf[4*4096] __attribute__ ((aligned));
 static int fd;
 static ct_conf_t *current_conf;
+struct sockaddr_storage bind4, bind6;
 
 static uint16_t get_packet_family (void* packet)
 {
@@ -118,6 +118,7 @@ int nfq_init(void)
 		{ AF_INET6, AF_INET6 },
 		{ 0       , 0        }
 	}, *p;
+	struct sockaddr_storage *bind_to;
 	int s;
 	for (p = map; p->pkt_family != 0; p++)
 	{
@@ -127,6 +128,20 @@ int nfq_init(void)
 			fprintf (stderr, "error opening raw socket: %s\n", strerror (errno));
 			return -1;
 		}
+
+		// bind to source address, if specified
+		bind_to = NULL;
+		if (p->dst_family == AF_INET6 && bind6.ss_family == AF_INET6)
+			bind_to = &bind6;
+		else if (p->dst_family == AF_INET && bind4.ss_family == AF_INET)
+			bind_to = &bind4;
+		if (bind_to != NULL)
+			if (0 != bind (s, (struct sockaddr *)bind_to, sizeof (*bind_to)))
+			{
+				fprintf (stderr, "bind(%s): %s\n", inet_sockaddrtos(bind_to), strerror (errno));
+				return -1;
+			}
+
 		*get_raw_sock(p->pkt_family, p->dst_family) = s;
 	}
 
