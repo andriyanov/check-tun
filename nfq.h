@@ -20,5 +20,6 @@
 
 #include "config.h"
 
+extern int nfq_debug;
 extern int nfq_init(void);
 extern int nfq_cycle_read(ct_conf_t *);

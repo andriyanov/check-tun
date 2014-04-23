@@ -34,14 +34,17 @@ int opt_d = 0;
 static char *conf_file;
 ct_conf_t *conf;
 int update_conf_flag = 0;
+int opt_dump_conf = 0;
 
 static void
 usage(char *progname, int exit_code)
 {
 	printf (
-"usage: %s [ -h ] [ -d ] -f conf_file\n"
+"usage: %s [ -h ] [ -dDC ] -f conf_file\n"
 "  -h     This help message\n"
 "  -d     Run as daemon\n"
+"  -D     Log debug messages\n"
+"  -C     Dump parsed config and exit\n"
 "  -f     keepalived config file path\n"
 , progname);
 	exit(exit_code);
@@ -57,7 +60,7 @@ int main(int argc, char **argv) {
 	char c;
 	if (argc == 1)
 		usage(argv[0], 1);
-	while (-1 != (c = getopt(argc, argv, "hdf:")))
+	while (-1 != (c = getopt(argc, argv, "hdDCf:")))
 		switch (c)
 		{
 			case 'h':
@@ -65,6 +68,12 @@ int main(int argc, char **argv) {
 				break;
 			case 'd':
 				opt_d = 1;
+				break;
+			case 'D':
+				nfq_debug = 1;
+				break;
+			case 'C':
+				opt_dump_conf = 1;
 				break;
 			case 'f':
 				conf_file = optarg;
@@ -79,6 +88,11 @@ int main(int argc, char **argv) {
 	{
 		fprintf (stderr, "Error reading config from %s. See syslog for details\n", conf_file);
 		return 1;
+	}
+	if (opt_dump_conf)
+	{
+		dump_conf(conf);
+		return 0;
 	}
 
 	// setup signal handler

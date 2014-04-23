@@ -31,7 +31,9 @@
 
 #include "nfq.h"
 #include "logger.h"
+#include "utils.h"
 
+int nfq_debug = 0;
 static int raw_socks[2][2];
 static struct nfq_handle *h;
 static struct nfq_q_handle *qh;
@@ -74,10 +76,17 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 	char *pkt;
 	int pkt_len = nfq_get_payload (nfa, &pkt);
 	int pkt_fam = get_packet_family (pkt);
+	int sent;
 
 	dst = lookup_dest (current_conf, mark);
-	if (dst != NULL)
-		sendto (
+	if (dst == NULL)
+	{
+		if (nfq_debug)
+			log_message (LOG_DEBUG, "can't find destination for fwmark %d", mark);
+	}
+	else
+	{
+		sent = sendto (
 			*get_raw_sock (pkt_fam, dst->ss_family),
 			pkt,
 			pkt_len,
@@ -85,6 +94,14 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 			(struct sockaddr*)dst,
 			sizeof (*dst)
 		);
+		if (nfq_debug)
+		{
+			if (sent < 0)
+				log_message (LOG_DEBUG, "sendto %s: %s", inet_sockaddrtos (dst), strerror (errno));
+			else
+				log_message (LOG_DEBUG, "sent %d bytes to %s", sent, inet_sockaddrtos (dst));
+		}
+	}
 
 	return nfq_set_verdict (qh, id, NF_DROP, pkt_len, pkt);
 }
