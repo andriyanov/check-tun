@@ -1,5 +1,5 @@
 CFLAGS += -I keepalived
-LDFLAGS += -lnetfilter_queue
+LDLIBS += -lnetfilter_queue
 
 OBJECTS += check-tun.o
 OBJECTS += nfq.o
@@ -12,5 +12,6 @@ OBJECTS += keepalived/vector.o
 
 check-tun: $(OBJECTS)
 
+.PHONY: clean
 clean:
 	rm $(OBJECTS) check-tun 2>/dev/null || true
