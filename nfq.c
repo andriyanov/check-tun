@@ -40,7 +40,7 @@ static struct nfnl_handle *nh;
 static char buf[4*4096] __attribute__ ((aligned));
 static int fd;
 static ct_conf_t *current_conf;
-struct sockaddr_storage bind4, bind6;
+struct sockaddr_storage bind4, bind6, remote_filter;
 
 static uint16_t get_packet_family (void* packet)
 {
@@ -125,7 +125,14 @@ int nfq_init(void)
 		s = socket (p->dst_family, SOCK_RAW, (p->pkt_family == AF_INET ? IPPROTO_IPIP : IPPROTO_IPV6));
 		if (s < 0)
 		{
-			fprintf (stderr, "error opening raw socket: %s\n", strerror (errno));
+			perror ("socket(SOCK_RAW)");
+			return -1;
+		}
+
+		// filter out packet coming into socket (prevent copying the skb)
+		if (0 != connect (s, (struct sockaddr*) &remote_filter, sizeof (remote_filter)))
+		{
+			perror ("connect");
 			return -1;
 		}
 
