@@ -33,23 +33,33 @@
 
 int opt_d = 0;
 static char *conf_file;
+static char *pid_file;
 ct_conf_t *conf;
 int update_conf_flag = 0;
 int opt_dump_conf = 0;
+
+static FILE* pidf = NULL;
 
 static void
 usage(char *progname, int exit_code)
 {
 	printf (
-"usage: %s [ -h ] [ -dDC ] [ -b SRC_IP ] -f conf_file\n"
+"usage: %s [ -h ] [ -dDC ] [ -b SRC_IP ] [ -p PIDFILE ] -f conf_file\n"
 "  -h     This help message\n"
 "  -d     Run as daemon\n"
 "  -D     Log debug messages\n"
 "  -C     Dump parsed config and exit\n"
 "  -b     Source IP address. Could be multiple, for inet and inet6\n"
 "  -f     keepalived config file path\n"
+"  -p     create pid file with specified name\n"
 , progname);
 	exit(exit_code);
+}
+
+static void delete_pid_file(void)
+{
+	if (pid_file && pidf)
+		unlink (pid_file);
 }
 
 static void hup_handler (int signum)
@@ -57,12 +67,19 @@ static void hup_handler (int signum)
 	update_conf_flag = 1;
 }
 
-int main(int argc, char **argv) {
+static void exit_handler (int signum)
+{
+	delete_pid_file();
+	// TODO: call default handler
+}
+
+static int main0(int argc, char **argv)
+{
 	// parse options
 	char c;
 	if (argc == 1)
 		usage(argv[0], 1);
-	while (-1 != (c = getopt(argc, argv, "hdDCf:b:")))
+	while (-1 != (c = getopt(argc, argv, "hdDCf:b:p:")))
 		switch (c)
 		{
 			case 'h':
@@ -102,6 +119,9 @@ int main(int argc, char **argv) {
 				}
 			}
 				break;
+			case 'p':
+				pid_file = optarg;
+				break;
 			default:
 				return 1;
 		}
@@ -134,6 +154,17 @@ int main(int argc, char **argv) {
 	// init sockets
 	if (nfq_init())
 		return 1;
+	
+	// open pid fh
+	if (pid_file != NULL)
+	{
+		pidf = fopen(pid_file, "w");
+		if (! pidf)
+		{
+			perror (pid_file);
+			return 1;
+		}
+	}
 
 	// daemonize
 	if (! opt_d)
@@ -143,6 +174,14 @@ int main(int argc, char **argv) {
 		perror("daemon");
 		return 1;
 	}
+
+	// write pid
+	if (pid_file != NULL)
+	{
+		fprintf (pidf, "%d", getpid());
+		fclose (pidf);
+	}
+
 	log_message (LOG_INFO, "started listening");
 
 	// main loop
@@ -168,3 +207,11 @@ int main(int argc, char **argv) {
 
 	return 0;
 }
+
+int main (int argc, char **argv)
+{
+	int ret = main0 (argc, argv);
+	delete_pid_file();
+	return ret;
+}
+
