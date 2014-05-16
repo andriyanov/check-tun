@@ -12,6 +12,11 @@ OBJECTS += keepalived/vector.o
 
 check-tun: $(OBJECTS)
 
-.PHONY: clean
+install: check-tun
+	install -d ${DESTDIR}/usr/sbin
+	install check-tun ${DESTDIR}/usr/sbin
+
 clean:
 	rm $(OBJECTS) check-tun 2>/dev/null || true
+
+.PHONY: clean
