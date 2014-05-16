@@ -1,0 +1,10 @@
+# Defaults for check-tun initscript
+# sourced by /etc/init.d/check-tun
+# installed at /etc/default/check-tun by the maintainer scripts
+
+#
+# This is a POSIX shell fragment
+#
+
+# Additional options that are passed to the Daemon.
+DAEMON_OPTS="-d -f /etc/keepalived/keepalived.conf"

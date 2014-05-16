@@ -1,0 +1,14 @@
+Source: check-tun
+Section: net
+Priority: extra
+Maintainer: Alexey Andriyanov <alan@yandex-team.ru>
+Build-Depends: debhelper (>= 7.0.50~)
+Standards-Version: 3.8.4
+Homepage: https://github.com/andriyanov/check-tun
+Vcs-Git: git://github.com/andriyanov/check-tun.git
+
+Package: check-tun
+Architecture: any
+Depends: rsyslog, sudo, ${shlibs:Depends}, ${misc:Depends}
+Suggests: keepalived (>= 1.2.13)
+Description: daemon for encapsulating keepalived checks based on fwmark
