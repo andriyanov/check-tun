@@ -24,5 +24,5 @@
 extern int nfq_debug;
 extern struct sockaddr_storage bind4, bind6;
 
-extern int nfq_init(void);
+extern int nfq_init(int);
 extern int nfq_cycle_read(ct_conf_t *);

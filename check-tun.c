@@ -32,6 +32,7 @@
 #include "logger.h"
 
 int opt_d = 0;
+static int opt_q = 0;
 static char *conf_file;
 static char *pid_file;
 ct_conf_t *conf;
@@ -44,7 +45,7 @@ static void
 usage (char *progname, int exit_code)
 {
 	printf (
-"usage: %s [ -h ] [ -dDC ] [ -b SRC_IP ] [ -p PIDFILE ] -f conf_file\n"
+"usage: %s [ -h ] [ -dDC ] [ -b SRC_IP ] [ -p PIDFILE ] [ -q QNUM ] -f conf_file\n"
 "  -h     This help message\n"
 "  -d     Run as daemon\n"
 "  -D     Log debug messages\n"
@@ -52,6 +53,7 @@ usage (char *progname, int exit_code)
 "  -b     Source IP address. Could be multiple, for inet and inet6\n"
 "  -f     keepalived config file path\n"
 "  -p     create pid file with specified name\n"
+"  -q     use specified nfqueue number. Default is 0\n"
 , progname);
 	exit(exit_code);
 }
@@ -79,7 +81,7 @@ static int main0 (int argc, char **argv)
 	char c;
 	if (argc == 1)
 		usage(argv[0], 1);
-	while (-1 != (c = getopt(argc, argv, "hdDCf:b:p:")))
+	while (-1 != (c = getopt(argc, argv, "hdDCf:b:p:q:")))
 		switch (c)
 		{
 			case 'h':
@@ -122,6 +124,9 @@ static int main0 (int argc, char **argv)
 			case 'p':
 				pid_file = optarg;
 				break;
+			case 'q':
+				opt_q = atoi (optarg);
+				break;
 			default:
 				return 1;
 		}
@@ -152,7 +157,7 @@ static int main0 (int argc, char **argv)
 	}
 
 	// init sockets
-	if (nfq_init())
+	if (nfq_init(opt_q))
 		return 1;
 
 	// open pid fh

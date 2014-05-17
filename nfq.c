@@ -106,7 +106,7 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 	return nfq_set_verdict (qh, id, NF_DROP, pkt_len, pkt);
 }
 
-int nfq_init(void)
+int nfq_init(int qnum)
 {
 	// opening raw sockets
 	struct {
@@ -176,7 +176,7 @@ int nfq_init(void)
 		return -1;
 	}
 
-	qh = nfq_create_queue(h,  0, &cb, NULL);
+	qh = nfq_create_queue(h, qnum, &cb, NULL);
 	if (!qh) {
 		fprintf (stderr, "nfq_create_queue() error\n");
 		return -1;
