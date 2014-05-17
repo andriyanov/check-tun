@@ -62,9 +62,9 @@ usage (char *progname, int exit_code)
 "  -D     Log debug messages\n"
 "  -C     Dump parsed config and exit\n"
 "  -b     Source IP address. Could be multiple, for inet and inet6\n"
-"  -f     keepalived config file path\n"
 "  -p     create pid file with specified name\n"
 "  -q     use specified nfqueue number. Default is 0\n"
+"  -f     keepalived config file path\n"
 , progname);
 	exit(exit_code);
 }
