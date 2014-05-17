@@ -1,7 +1,7 @@
 Source: check-tun
 Section: net
 Priority: extra
-Maintainer: Alexey Andriyanov <alan@yandex-team.ru>
+Maintainer: Alexey Andriyanov <alan@al-an.info>
 Build-Depends: debhelper (>= 7.0.50~)
 Standards-Version: 3.8.4
 Homepage: https://github.com/andriyanov/check-tun

@@ -11,7 +11,7 @@
 #                    <...>
 ### END INIT INFO
 
-# Author: Alexey Andriyanov <alan@yandex-team.ru>
+# Author: Alexey Andriyanov <alan@al-an.info>
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
