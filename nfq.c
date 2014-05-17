@@ -201,7 +201,7 @@ int nfq_cycle_read(ct_conf_t * conf)
 		nfq_handle_packet(h, buf, rv);
 		return 0;
 	}
-	else if (rv == -1 && errno == EAGAIN)
+	else if (rv == -1 && errno == EINTR)
 		return 0;
 
 	if (rv == 0)
