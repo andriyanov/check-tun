@@ -1,4 +1,5 @@
 CFLAGS += -I keepalived
+CFLAGS += -D_GNU_SOURCE
 LDLIBS += -lnetfilter_queue
 
 OBJECTS += check-tun.o

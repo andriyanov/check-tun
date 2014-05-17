@@ -25,21 +25,32 @@
 #include <signal.h>
 #include <syslog.h>
 #include <signal.h>
+#include <limits.h>
 #include <sys/socket.h>
 
 #include "config.h"
 #include "nfq.h"
 #include "logger.h"
 
-int opt_d = 0;
+static int opt_d = 0;
 static int opt_q = 0;
 static char *conf_file;
 static char *pid_file;
-ct_conf_t *conf;
-int update_conf_flag = 0;
-int opt_dump_conf = 0;
-
+static char abs_pid_file[PATH_MAX];
+static ct_conf_t *conf;
+static int update_conf_flag = 0;
+static int opt_dump_conf = 0;
 static FILE* pidf = NULL;
+
+// signal handlers config
+static void exit_handler (int);
+static void hup_handler (int);
+static sighandler_t sig_table[NSIG] = {
+	[SIGINT]  = &exit_handler,
+	[SIGQUIT] = &exit_handler,
+	[SIGTERM] = &exit_handler,
+	[SIGHUP]  = &hup_handler,
+};
 
 static void
 usage (char *progname, int exit_code)
@@ -58,21 +69,30 @@ usage (char *progname, int exit_code)
 	exit(exit_code);
 }
 
-static void delete_pid_file(void)
-{
-	if (pid_file && pidf)
-		unlink (pid_file);
-}
-
 static void hup_handler (int signum)
 {
 	update_conf_flag = 1;
 }
 
+static void delete_pid_file (void)
+{
+	if (pid_file && pidf)
+		unlink (abs_pid_file);
+}
+
 static void exit_handler (int signum)
 {
 	delete_pid_file();
-	// TODO: call default handler
+
+	// call the default handler
+	static struct sigaction act = {
+		.sa_handler = SIG_DFL,
+	};
+	if (0 == sigaction (signum, &act, NULL))
+	{
+		log_message (LOG_INFO, strsignal(signum));
+		raise (signum);
+	}
 }
 
 static int main0 (int argc, char **argv)
@@ -144,17 +164,22 @@ static int main0 (int argc, char **argv)
 		return 0;
 	}
 
-	// setup signal handler
+	// setup signal handlers
 	struct sigaction act = {
-			.sa_handler = &hup_handler,
 			.sa_mask = 0,
 			.sa_flags = SA_NODEFER,
 	};
-	if (0 > sigaction (SIGHUP, &act, NULL))
-	{
-		perror("sigaction");
-		return 1;
-	}
+	int signum;
+	for (signum = 0; signum < NSIG; signum++)
+		if (sig_table[signum])
+		{
+			act.sa_handler = sig_table[signum];
+			if (0 > sigaction (signum, &act, NULL))
+			{
+				perror("sigaction");
+				return 1;
+			}
+		}
 
 	// init sockets
 	if (nfq_init(opt_q))
@@ -167,6 +192,11 @@ static int main0 (int argc, char **argv)
 		if (! pidf)
 		{
 			perror (pid_file);
+			return 1;
+		}
+		if (! realpath (pid_file, abs_pid_file))
+		{
+			perror ("realpath");
 			return 1;
 		}
 	}
