@@ -7,4 +7,4 @@
 #
 
 # Additional options that are passed to the Daemon.
-DAEMON_OPTS="-d -f /etc/keepalived/keepalived.conf"
+DAEMON_OPTS="-f /etc/keepalived/keepalived.conf"
