@@ -2,9 +2,9 @@
  * Soft:        check-tun is a userspace daemon that encapsulates packets
  *              captured through netfilter-nfqueue to the configured
  *              destinations based on fwmark on the packet.
- * 
+ *
  * Author:      Alexey Andriyanov, <alan@al-an.info>
- *              
+ *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
  *              MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

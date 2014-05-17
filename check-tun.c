@@ -2,9 +2,9 @@
  * Soft:        check-tun is a userspace daemon that encapsulates packets
  *              captured through netfilter-nfqueue to the configured
  *              destinations based on fwmark on the packet.
- * 
+ *
  * Author:      Alexey Andriyanov, <alan@al-an.info>
- *              
+ *
  *              This program is distributed in the hope that it will be useful,
  *              but WITHOUT ANY WARRANTY; without even the implied warranty of
  *              MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -41,7 +41,7 @@ int opt_dump_conf = 0;
 static FILE* pidf = NULL;
 
 static void
-usage(char *progname, int exit_code)
+usage (char *progname, int exit_code)
 {
 	printf (
 "usage: %s [ -h ] [ -dDC ] [ -b SRC_IP ] [ -p PIDFILE ] -f conf_file\n"
@@ -73,7 +73,7 @@ static void exit_handler (int signum)
 	// TODO: call default handler
 }
 
-static int main0(int argc, char **argv)
+static int main0 (int argc, char **argv)
 {
 	// parse options
 	char c;
@@ -154,7 +154,7 @@ static int main0(int argc, char **argv)
 	// init sockets
 	if (nfq_init())
 		return 1;
-	
+
 	// open pid fh
 	if (pid_file != NULL)
 	{
