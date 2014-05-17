@@ -22,6 +22,8 @@ case "$1" in
     configure)
 		echo "syslog  root,ALL = NOPASSWD: /etc/init.d/check-tun syslog-reload" | \
 		VISUAL=tee visudo -f /etc/sudoers.d/check-tun >/dev/null
+
+		service rsyslog restart
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
