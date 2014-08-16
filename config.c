@@ -99,6 +99,7 @@ finalize_rs (struct ct_pair *pair)
 	if (pair->fwmark && pair->dst.ss_family != AF_UNSPEC)
 		add_dest (current_conf, pair->fwmark, &pair->dst);
 	pair->dst.ss_family = AF_UNSPEC;
+	pair->fwmark = 0;
 }
 
 static void rs_handler (vector_t *strvec)
@@ -142,6 +143,10 @@ check_init_keywords(void)
 	{
 		install_keyword(checkers[i], NULL);
 		install_sublevel();
+		install_keyword("url", NULL);
+		install_sublevel();
+		install_keyword("dummy", NULL);
+		install_sublevel_end();
 		install_keyword("fwmark", &fwmark_handler);
 		install_sublevel_end();
 	}
