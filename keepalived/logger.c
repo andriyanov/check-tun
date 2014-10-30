@@ -25,7 +25,8 @@
 #include <stdarg.h>
 
 /* Boolean flag - send messages to console as well as syslog */
-static int log_console = 0;
+int log_console = 0;
+int log_syslog = 1;
 
 void
 enable_console_log(void)
@@ -47,5 +48,7 @@ log_message(const int facility, const char *format, ...)
 		fprintf(stderr, "%s\n", buf);
 	}
 
-	syslog(facility, "%s", buf);
+	if (log_syslog) {
+		syslog(facility, "%s", buf);
+	}
 }

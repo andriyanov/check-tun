@@ -145,7 +145,7 @@ int nfq_init(int qnum)
 		if (bind_to != NULL)
 			if (0 != bind (s, (struct sockaddr *)bind_to, sizeof (*bind_to)))
 			{
-				fprintf (stderr, "bind(%s): %s\n", inet_sockaddrtos(bind_to), strerror (errno));
+				log_message (LOG_ERR, "bind(%s): %s", inet_sockaddrtos(bind_to), strerror (errno));
 				return -1;
 			}
 
@@ -154,36 +154,36 @@ int nfq_init(int qnum)
 
 	h = nfq_open();
 	if (!h) {
-		fprintf (stderr, "nfq_open() error");
+		log_message (LOG_ERR, "nfq_open() error");
 		return -1;
 	}
 
 	if (nfq_unbind_pf(h, AF_INET) < 0) {
-		fprintf (stderr, "nfq_unbind_pf(AF_INET) error\n");
+		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET) error: %s", strerror(errno));
 		return -1;
 	}
 	if (nfq_bind_pf(h, AF_INET) < 0) {
-		fprintf (stderr, "nfq_bind_pf(AF_INET) error\n");
+		log_message (LOG_ERR, "nfq_bind_pf(AF_INET) error: %s", strerror(errno));
 		return -1;
 	}
 
 	if (nfq_unbind_pf(h, AF_INET6) < 0) {
-		fprintf (stderr, "nfq_unbind_pf(AF_INET6) error\n");
+		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET6) error: %s", strerror(errno));
 		return -1;
 	}
 	if (nfq_bind_pf(h, AF_INET6) < 0) {
-		fprintf (stderr, "nfq_bind_pf(AF_INET6) error");
+		log_message (LOG_ERR, "nfq_bind_pf(AF_INET6) error: %s", strerror(errno));
 		return -1;
 	}
 
 	qh = nfq_create_queue(h, qnum, &cb, NULL);
 	if (!qh) {
-		fprintf (stderr, "nfq_create_queue() error\n");
+		log_message (LOG_ERR, "nfq_create_queue() error: %s", strerror(errno));
 		return -1;
 	}
 
 	if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
-		fprintf (stderr, "nfq_set_mode(NFQNL_COPY_PACKET) error\n");
+		log_message (LOG_ERR, "nfq_set_mode(NFQNL_COPY_PACKET) error: %s", strerror(errno));
 		return -1;
 	}
 
@@ -210,4 +210,5 @@ int nfq_cycle_read(ct_conf_t * conf)
 		log_message (LOG_WARNING, "recv: %s", strerror (errno));
 	nfq_destroy_queue(qh);
 	nfq_close(h);
+	return -1;
 }

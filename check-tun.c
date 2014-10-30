@@ -97,6 +97,9 @@ static void exit_handler (int signum)
 
 static int main0 (int argc, char **argv)
 {
+	log_console = 1;
+	log_syslog = 0;
+
 	// parse options
 	char c;
 	if (argc == 1)
@@ -202,12 +205,15 @@ static int main0 (int argc, char **argv)
 	}
 
 	// daemonize
-	if (! opt_d)
-		enable_console_log();
-	else if (daemon(0, 0) != 0)
+	if (opt_d)
 	{
-		perror("daemon");
-		return 1;
+		if (daemon(0, 0) != 0)
+		{
+			perror("daemon");
+			return 1;
+		}
+		log_console = 0;
+		log_syslog = 1;
 	}
 
 	// write pid
@@ -237,7 +243,13 @@ static int main0 (int argc, char **argv)
 
 		// process packets
 		if (nfq_cycle_read(conf) != 0)
-			return 1;
+		{
+			// try to re-init NFQUEUE
+			sleep(1);
+			log_message (LOG_WARNING, "trying to re-init NFQUEUE");
+			if (nfq_init(opt_q))
+				return 1;
+		}
 	}
 
 	return 0;
@@ -247,6 +259,8 @@ int main (int argc, char **argv)
 {
 	int ret = main0 (argc, argv);
 	delete_pid_file();
+	if (log_syslog && ret)
+		log_message (LOG_WARNING, "exiting with code %d", ret);
 	return ret;
 }
 

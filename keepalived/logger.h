@@ -23,6 +23,9 @@
 #ifndef _LOGGER_H
 #define _LOGGER_H
 
+extern int log_console;
+extern int log_syslog;
+
 void enable_console_log(void);
 void log_message(int priority, char* format, ...);
 
