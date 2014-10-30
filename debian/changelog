@@ -1,3 +1,10 @@
+check-tun (1.0-2) unstable; urgency=low
+
+  * debug info, more logging
+  * protect from unexpected NFQ socket close
+
+ -- Alexey Andriyanov <alan@yandex-team.ru>  Thu, 30 Oct 2014 16:13:54 +0400
+
 check-tun (1.0-1) unstable; urgency=low
 
   * Initial release

@@ -1,6 +1,6 @@
-CFLAGS += -I keepalived
-CFLAGS += -D_GNU_SOURCE -Dmemcpy=memmove
-LDLIBS += -lnetfilter_queue
+override CFLAGS += -I keepalived
+override CFLAGS += -D_GNU_SOURCE
+override LDLIBS += -lnetfilter_queue
 
 OBJECTS += check-tun.o
 OBJECTS += nfq.o

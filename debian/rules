@@ -12,6 +12,11 @@
 %:
 	dh $@ 
 
+override_dh_auto_build:
+	dh_auto_build -- "CFLAGS=-g -Dmemcpy=memmove"
+
 override_dh_clean:
 	make clean
 	dh_clean
+
+override_dh_strip:
