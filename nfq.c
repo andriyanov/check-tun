@@ -24,8 +24,10 @@
 #include <errno.h>
 #include <syslog.h>
 
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter.h>	    /* for NF_DROP */
+#include <linux/netlink.h>	    /* for NETLINK_NO_ENOBUFS */
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
 #include "nfq.h"
@@ -37,7 +39,7 @@ static int raw_socks[2][2];
 static struct nfq_handle *h;
 static struct nfq_q_handle *qh;
 static struct nfnl_handle *nh;
-static char buf[4*4096] __attribute__ ((aligned));
+static char buf[8*4096] __attribute__ ((aligned));
 static int fd;
 static ct_conf_t *current_conf;
 struct sockaddr_storage bind4, bind6, remote_filter;
@@ -189,6 +191,15 @@ int nfq_init(int qnum)
 
 	fd = nfq_fd(h);
 
+#if defined SOL_NETLINK && defined NETLINK_NO_ENOBUFS
+	if (setsockopt(fd, SOL_NETLINK, NETLINK_NO_ENOBUFS, (int[]){1}, sizeof(int)) < 0) {
+		log_message (LOG_ERR, "Unable to setsockopt NETLINK_NO_ENOBUFS: %s", strerror(errno));
+		return -1;
+	}
+	if (nfq_debug)
+		log_message(LOG_DEBUG, "set NETLINK_NO_ENOBUFS mode");
+#endif
+
 	return 0;
 }
 
@@ -198,16 +209,19 @@ int nfq_cycle_read(ct_conf_t * conf)
 	int rv = recv(fd, buf, sizeof(buf), 0);
 	if (rv > 0)
 	{
+		if (nfq_debug)
+			log_message (LOG_DEBUG, "got %d bytes from netlink", rv);
 		nfq_handle_packet(h, buf, rv);
 		return 0;
 	}
-	else if (rv == -1 && errno == EINTR)
-		return 0;
-
-	if (rv == 0)
-		log_message (LOG_WARNING, "NFQ socket closed");
-	else
+	else if (rv == -1)
+	{
+		if (errno == EINTR)
+			return 0;
 		log_message (LOG_WARNING, "recv: %s", strerror (errno));
+	}
+	else // rv == 0
+		log_message (LOG_WARNING, "NFQ socket closed");
 	nfq_destroy_queue(qh);
 	nfq_close(h);
 	return -1;

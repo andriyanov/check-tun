@@ -1,3 +1,9 @@
+check-tun (1.0-4) unstable; urgency=low
+
+  * set NETLINK_NO_ENOBUFS = 1 to silently drop large nfq packets
+
+ -- Alexey Andriyanov <alan@yandex-team.ru>  Fri, 31 Oct 2014 17:24:04 +0400
+
 check-tun (1.0-3) unstable; urgency=low
 
   * debug info, more logging
