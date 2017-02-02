@@ -18,11 +18,33 @@
  * Copyright (C) 2014 Alexey Andriyanov, <alan@al-an.info>
  */
 
+#include <stdint.h>
+#include <stdbool.h>
 #include <sys/socket.h>
+#include <libnetfilter_queue/libnetfilter_queue.h>
+
 #include "config.h"
+#include "keepalived/utils.h"
+#include "keepalived/memory.h"
+
+typedef struct nfq_thread_var {
+    unsigned int nfq_q_num;
+    unsigned int thread_num;
+    bool err;
+    bool terminated;
+    bool cpu_affinity;
+    struct nfq_handle *h;
+    struct nfq_q_handle *qh;
+    struct nfnl_handle *nh;
+    int fd;
+    ct_conf_t *current_conf;
+    ct_conf_t **global_conf;
+    char buf[8*4096] __attribute__ ((aligned));
+} nfq_thread_var_t;
 
 extern int nfq_debug;
 extern struct sockaddr_storage bind4, bind6;
 
-extern int nfq_init(int);
-extern int nfq_cycle_read(ct_conf_t *);
+extern int nfq_init(int, nfq_thread_var_t *);
+extern int nfq_done(int, nfq_thread_var_t *);
+//extern int nfq_cycle_read(ct_conf_t *);

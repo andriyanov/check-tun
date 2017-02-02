@@ -1,6 +1,6 @@
 override CFLAGS += -I keepalived
-override CFLAGS += -D_GNU_SOURCE
-override LDLIBS += -lnetfilter_queue
+override CFLAGS += -std=gnu99 -D_GNU_SOURCE
+override LDLIBS += -lnetfilter_queue -lpthread
 
 OBJECTS += check-tun.o
 OBJECTS += nfq.o

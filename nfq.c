@@ -23,12 +23,13 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <syslog.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter.h>	    /* for NF_DROP */
 #include <linux/netlink.h>	    /* for NETLINK_NO_ENOBUFS */
-#include <libnetfilter_queue/libnetfilter_queue.h>
 
 #include "nfq.h"
 #include "logger.h"
@@ -36,13 +37,8 @@
 
 int nfq_debug = 0;
 static int raw_socks[2][2];
-static struct nfq_handle *h;
-static struct nfq_q_handle *qh;
-static struct nfnl_handle *nh;
-static char buf[8*4096] __attribute__ ((aligned));
-static int fd;
-static ct_conf_t *current_conf;
 struct sockaddr_storage bind4, bind6, remote_filter;
+pthread_t *nfq_threads;
 
 static uint16_t get_packet_family (void* packet)
 {
@@ -68,19 +64,21 @@ get_raw_sock (int pkt_family, int dst_family)
 static int
 cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data)
 {
-	int id = 0;
-	unsigned int mark = 0;
+	nfq_thread_var_t *nfq_var = (nfq_thread_var_t *)data;
+	int id;
+	unsigned int mark;
 	struct nfqnl_msg_packet_hdr *ph;
 	struct sockaddr_storage *dst;
+	unsigned char *pkt;
+
 	ph = nfq_get_msg_packet_hdr(nfa);
 	id = ntohl(ph->packet_id);
 	mark = nfq_get_nfmark(nfa);
-	char *pkt;
 	int pkt_len = nfq_get_payload (nfa, &pkt);
 	int pkt_fam = get_packet_family (pkt);
 	int sent;
 
-	dst = lookup_dest (current_conf, mark);
+	dst = lookup_dest (nfq_var->current_conf, mark);
 	if (dst == NULL)
 	{
 		if (nfq_debug)
@@ -105,11 +103,115 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 		}
 	}
 
-	return nfq_set_verdict (qh, id, NF_DROP, pkt_len, pkt);
+	return nfq_set_verdict (nfq_var->qh, id, NF_DROP, pkt_len, pkt);
 }
 
-int nfq_init(int qnum)
+static int nfq_init_thread(nfq_thread_var_t *nfq_vars)
 {
+	nfq_vars->h = nfq_open();
+	if (!nfq_vars->h) {
+		log_message (LOG_ERR, "Thread %d: nfq_open() error", nfq_vars->thread_num);
+		goto error;
+	}
+
+	if (nfq_unbind_pf(nfq_vars->h, AF_INET) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_unbind_pf(AF_INET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_bind_pf(nfq_vars->h, AF_INET) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_bind_pf(AF_INET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	if (nfq_unbind_pf(nfq_vars->h, AF_INET6) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_unbind_pf(AF_INET6) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_bind_pf(nfq_vars->h, AF_INET6) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_bind_pf(AF_INET6) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	nfq_vars->qh = nfq_create_queue(nfq_vars->h, nfq_vars->nfq_q_num, &cb, nfq_vars);
+	if (!nfq_vars->qh) {
+		log_message (LOG_ERR, "Thread %d: nfq_create_queue() error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	if (nfq_set_mode(nfq_vars->qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_set_mode(NFQNL_COPY_PACKET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	nfq_vars->fd = nfq_fd(nfq_vars->h);
+
+#if defined SOL_NETLINK && defined NETLINK_NO_ENOBUFS
+	if (setsockopt(nfq_vars->fd, SOL_NETLINK, NETLINK_NO_ENOBUFS, (int[]){1}, sizeof(int)) < 0) {
+		log_message (LOG_ERR, "Thread %d: Unable to setsockopt NETLINK_NO_ENOBUFS: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_debug)
+		log_message(LOG_DEBUG, "Thread %d: set NETLINK_NO_ENOBUFS mode", nfq_vars->thread_num);
+#endif
+	log_message (LOG_INFO, "Thread %d initialized", nfq_vars->thread_num);
+	return 0;
+error:
+	if (nfq_vars->qh) nfq_destroy_queue(nfq_vars->qh);
+	if (nfq_vars->h)  nfq_close(nfq_vars->h);
+	return -1;
+}
+
+static int nfq_cycle_read(nfq_thread_var_t *nfq_var)
+{
+	int rv = recv(nfq_var->fd, nfq_var->buf, sizeof(nfq_var->buf), 0);
+	if (rv > 0)
+	{
+		if (nfq_debug)
+			log_message (LOG_DEBUG, "got %d bytes from netlink", rv);
+		nfq_handle_packet(nfq_var->h, nfq_var->buf, rv);
+		return 0;
+	}
+	else if (rv == -1)
+	{
+		if (errno == EINTR)
+			return 0;
+		log_message (LOG_WARNING, "recv: %s", strerror (errno));
+	}
+	else // rv == 0
+		log_message (LOG_WARNING, "NFQ socket closed");
+	nfq_destroy_queue(nfq_var->qh);
+	nfq_var->qh = 0;
+	nfq_close(nfq_var->h);
+	nfq_var->h = 0;
+	return -1;
+}
+
+void *nfq_thread_func(void *data)
+{
+	nfq_thread_var_t *nfq_var = (nfq_thread_var_t *)data;
+
+	while (!nfq_var->terminated)
+	{
+		if (*(nfq_var->global_conf) != nfq_var->current_conf)
+			nfq_var->current_conf = *(nfq_var->global_conf);
+		if (nfq_cycle_read(nfq_var) == -1 && !nfq_var->terminated)
+		{
+			if (nfq_init_thread(nfq_var) == -1) {
+				nfq_var->err = true;
+				break;
+			}
+		}
+	}
+	pthread_exit(NULL);
+	return 0;
+}
+
+
+int nfq_init(int thnum, nfq_thread_var_t *nfq_vars)
+{
+	pthread_attr_t attr;
+	cpu_set_t cpuset;
+	int cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
 	// opening raw sockets
 	struct {
 		int pkt_family, dst_family;
@@ -121,6 +223,7 @@ int nfq_init(int qnum)
 		{ 0       , 0        }
 	}, *p;
 	struct sockaddr_storage *bind_to;
+	int started_threads = 0;
 	int s;
 	for (p = map; p->pkt_family != 0; p++)
 	{
@@ -153,76 +256,45 @@ int nfq_init(int qnum)
 
 		*get_raw_sock(p->pkt_family, p->dst_family) = s;
 	}
-
-	h = nfq_open();
-	if (!h) {
-		log_message (LOG_ERR, "nfq_open() error");
-		return -1;
+	nfq_threads = MALLOC(thnum * sizeof(pthread_t));
+	pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+	for (; started_threads < thnum; started_threads++, nfq_vars++)
+	{
+		if (nfq_init_thread(nfq_vars) == -1)
+			goto error;
+		pthread_create(&nfq_threads[started_threads], &attr, nfq_thread_func, (void *)nfq_vars);
+		if (nfq_vars->cpu_affinity)
+		{
+			CPU_ZERO(&cpuset);
+			CPU_SET(nfq_vars->thread_num % cpu_count, &cpuset);
+			if (pthread_setaffinity_np(nfq_threads[started_threads], sizeof(cpu_set_t), &cpuset))
+			{
+				log_message (LOG_WARNING, "Thread %d: Couldn't set cpu_affinity", started_threads);
+			}
+		}
 	}
-
-	if (nfq_unbind_pf(h, AF_INET) < 0) {
-		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET) error: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_bind_pf(h, AF_INET) < 0) {
-		log_message (LOG_ERR, "nfq_bind_pf(AF_INET) error: %s", strerror(errno));
-		return -1;
-	}
-
-	if (nfq_unbind_pf(h, AF_INET6) < 0) {
-		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET6) error: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_bind_pf(h, AF_INET6) < 0) {
-		log_message (LOG_ERR, "nfq_bind_pf(AF_INET6) error: %s", strerror(errno));
-		return -1;
-	}
-
-	qh = nfq_create_queue(h, qnum, &cb, NULL);
-	if (!qh) {
-		log_message (LOG_ERR, "nfq_create_queue() error: %s", strerror(errno));
-		return -1;
-	}
-
-	if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
-		log_message (LOG_ERR, "nfq_set_mode(NFQNL_COPY_PACKET) error: %s", strerror(errno));
-		return -1;
-	}
-
-	fd = nfq_fd(h);
-
-#if defined SOL_NETLINK && defined NETLINK_NO_ENOBUFS
-	if (setsockopt(fd, SOL_NETLINK, NETLINK_NO_ENOBUFS, (int[]){1}, sizeof(int)) < 0) {
-		log_message (LOG_ERR, "Unable to setsockopt NETLINK_NO_ENOBUFS: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_debug)
-		log_message(LOG_DEBUG, "set NETLINK_NO_ENOBUFS mode");
-#endif
-
+	pthread_attr_destroy(&attr);
 	return 0;
+error:
+	pthread_attr_destroy(&attr);
+	void *status;
+	while(started_threads) {
+		started_threads--;
+		nfq_vars--;
+		nfq_vars->terminated = true;
+		pthread_join(nfq_threads[started_threads], &status);
+	}
+	return -1;
 }
 
-int nfq_cycle_read(ct_conf_t * conf)
+int nfq_done(int numth, nfq_thread_var_t *nfq_vars)
 {
-	current_conf = conf;
-	int rv = recv(fd, buf, sizeof(buf), 0);
-	if (rv > 0)
-	{
-		if (nfq_debug)
-			log_message (LOG_DEBUG, "got %d bytes from netlink", rv);
-		nfq_handle_packet(h, buf, rv);
-		return 0;
+	void *status;
+	for (int i = 0; i < numth; i++, nfq_vars++) {
+		if (nfq_vars->err) continue;
+		nfq_vars->terminated = true;
+		pthread_join(nfq_threads[i], &status);
 	}
-	else if (rv == -1)
-	{
-		if (errno == EINTR)
-			return 0;
-		log_message (LOG_WARNING, "recv: %s", strerror (errno));
-	}
-	else // rv == 0
-		log_message (LOG_WARNING, "NFQ socket closed");
-	nfq_destroy_queue(qh);
-	nfq_close(h);
-	return -1;
+	return 0;
 }

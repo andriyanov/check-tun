@@ -1,3 +1,11 @@
+check-tun (1.1-1) unstable; urgency=low
+
+  * Add multhithreading option -t <thread_count>
+    Requires more then 1 NFQUEUE (iptables -j NFQUEUE --queue-balance 1:<thread_count>)
+  * Add option -a to set cpu_affinity for threads
+
+ -- Vadim Fedorenko <junk@yandex-team.ru>  Thu, 02 Feb 2017 15:11:32 +0300
+
 check-tun (1.0-4) unstable; urgency=low
 
   * set NETLINK_NO_ENOBUFS = 1 to silently drop large nfq packets
