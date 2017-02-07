@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <net/if.h>
 
 #include "config.h"
 #include "nfq.h"
@@ -40,6 +41,8 @@ static bool opt_a = false;
 static char *conf_file;
 static char *pid_file;
 static char abs_pid_file[PATH_MAX];
+static char ifname[IF_NAMESIZE];
+
 static ct_conf_t *conf;
 static ct_conf_t *oldconf = NULL;
 static int update_conf_flag = 0;
@@ -74,6 +77,7 @@ usage (char *progname, int exit_code)
 "         each thread uses its own queue (start number + thread num)\n"
 "  -f     keepalived config file path\n"
 "  -a     set cpu_affinity for worker threads and bind to cpus from 0 to thread num\n"
+"  -i     set interface to bind\n"
 , progname);
 	exit(exit_code);
 }
@@ -108,12 +112,12 @@ static int main0 (int argc, char **argv)
 {
 	log_console = 1;
 	log_syslog = 0;
-
+	bzero(ifname, sizeof(ifname));
 	// parse options
 	char c;
 	if (argc == 1)
 		usage(argv[0], 1);
-	while (-1 != (c = getopt(argc, argv, "ahdDCf:b:p:q:t:")))
+	while (-1 != (c = getopt(argc, argv, "ahdDCf:b:p:q:t:i:")))
 		switch (c)
 		{
 			case 'h':
@@ -164,6 +168,10 @@ static int main0 (int argc, char **argv)
 				break;
 			case 'a':
 				opt_a = true;
+				break;
+			case 'i':
+				strncpy(ifname,optarg,IF_NAMESIZE);
+				ifname[IF_NAMESIZE-1]=0;
 				break;
 			default:
 				return 1;
@@ -253,7 +261,8 @@ static int main0 (int argc, char **argv)
 		nfq_thread_vars[i].cpu_affinity = opt_a;
 	}
 	// init sockets
-	if (nfq_init(opt_th, nfq_thread_vars))
+	nfq_init_int(ifname);
+	if (nfq_init_th(opt_th, nfq_thread_vars))
 	{
 		delete_pid_file();
 		perror("threads start error");
