@@ -63,3 +63,4 @@ extern int nfq_init_int(char *);
 extern int nfq_init_th(int, nfq_thread_var_t *);
 extern int nfq_done(int, nfq_thread_var_t *);
 //extern int nfq_cycle_read(ct_conf_t *);
+extern void nfq_thread_hup(int thread_num);

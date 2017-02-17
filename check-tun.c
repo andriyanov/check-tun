@@ -292,6 +292,7 @@ static int main0 (int argc, char **argv)
 				for (int i = 0; i < opt_th && conf_updated; i++)
 				{
 					conf_updated &= (conf == nfq_thread_vars[i].current_conf);
+					if (!(conf == nfq_thread_vars[i].current_conf)) nfq_thread_hup(i);
 				}
 				nanosleep(&tm, NULL);
 			}
