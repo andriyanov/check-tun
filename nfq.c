@@ -23,12 +23,14 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <syslog.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/netfilter.h>	    /* for NF_DROP */
-#include <linux/netlink.h>	    /* for NETLINK_NO_ENOBUFS */
-#include <libnetfilter_queue/libnetfilter_queue.h>
+#include <net/if.h>
 
 #include "nfq.h"
 #include "logger.h"
@@ -36,13 +38,8 @@
 
 int nfq_debug = 0;
 static int raw_socks[2][2];
-static struct nfq_handle *h;
-static struct nfq_q_handle *qh;
-static struct nfnl_handle *nh;
-static char buf[8*4096] __attribute__ ((aligned));
-static int fd;
-static ct_conf_t *current_conf;
 struct sockaddr_storage bind4, bind6, remote_filter;
+pthread_t *nfq_threads;
 
 static uint16_t get_packet_family (void* packet)
 {
@@ -68,19 +65,21 @@ get_raw_sock (int pkt_family, int dst_family)
 static int
 cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data)
 {
-	int id = 0;
-	unsigned int mark = 0;
+	nfq_thread_var_t *nfq_var = (nfq_thread_var_t *)data;
+	int id;
+	unsigned int mark;
 	struct nfqnl_msg_packet_hdr *ph;
 	struct sockaddr_storage *dst;
+	unsigned char *pkt;
+
 	ph = nfq_get_msg_packet_hdr(nfa);
 	id = ntohl(ph->packet_id);
 	mark = nfq_get_nfmark(nfa);
-	char *pkt;
 	int pkt_len = nfq_get_payload (nfa, &pkt);
 	int pkt_fam = get_packet_family (pkt);
 	int sent;
 
-	dst = lookup_dest (current_conf, mark);
+	dst = lookup_dest (nfq_var->current_conf, mark);
 	if (dst == NULL)
 	{
 		if (nfq_debug)
@@ -105,12 +104,235 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 		}
 	}
 
-	return nfq_set_verdict (qh, id, NF_DROP, pkt_len, pkt);
+	return nfq_set_verdict (nfq_var->qh, id, NF_DROP, pkt_len, pkt);
 }
 
-int nfq_init(int qnum)
+
+static int nfq_init_thread(nfq_thread_var_t *nfq_vars)
 {
-	// opening raw sockets
+	nfq_vars->h = nfq_open();
+	if (!nfq_vars->h) {
+		log_message (LOG_ERR, "Thread %d: nfq_open() error", nfq_vars->thread_num);
+		goto error;
+	}
+
+	if (nfq_unbind_pf(nfq_vars->h, AF_INET) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_unbind_pf(AF_INET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_bind_pf(nfq_vars->h, AF_INET) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_bind_pf(AF_INET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	if (nfq_unbind_pf(nfq_vars->h, AF_INET6) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_unbind_pf(AF_INET6) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_bind_pf(nfq_vars->h, AF_INET6) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_bind_pf(AF_INET6) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	nfq_vars->qh = nfq_create_queue(nfq_vars->h, nfq_vars->nfq_q_num, &cb, nfq_vars);
+	if (!nfq_vars->qh) {
+		log_message (LOG_ERR, "Thread %d: nfq_create_queue() error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	if (nfq_set_mode(nfq_vars->qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+		log_message (LOG_ERR, "Thread %d: nfq_set_mode(NFQNL_COPY_PACKET) error: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+
+	nfq_vars->fd = nfq_fd(nfq_vars->h);
+
+#if defined SOL_NETLINK && defined NETLINK_NO_ENOBUFS
+	if (setsockopt(nfq_vars->fd, SOL_NETLINK, NETLINK_NO_ENOBUFS, (int[]){1}, sizeof(int)) < 0) {
+		log_message (LOG_ERR, "Thread %d: Unable to setsockopt NETLINK_NO_ENOBUFS: %s", nfq_vars->thread_num, strerror(errno));
+		goto error;
+	}
+	if (nfq_debug)
+		log_message(LOG_DEBUG, "Thread %d: set NETLINK_NO_ENOBUFS mode", nfq_vars->thread_num);
+#endif
+	log_message (LOG_INFO, "Thread %d initialized", nfq_vars->thread_num);
+	return 0;
+error:
+	if (nfq_vars->qh) nfq_destroy_queue(nfq_vars->qh);
+	if (nfq_vars->h)  nfq_close(nfq_vars->h);
+	return -1;
+}
+
+static int nfq_cycle_read(nfq_thread_var_t *nfq_var)
+{
+	int rv = recv(nfq_var->fd, nfq_var->buf, sizeof(nfq_var->buf), 0);
+	if (rv > 0)
+	{
+		if (nfq_debug)
+			log_message (LOG_DEBUG, "got %d bytes from netlink", rv);
+		nfq_handle_packet(nfq_var->h, nfq_var->buf, rv);
+		return 0;
+	}
+	else if (rv == -1)
+	{
+		if (errno == EINTR)
+			return 0;
+		log_message (LOG_WARNING, "recv: %s", strerror (errno));
+	}
+	else // rv == 0
+		log_message (LOG_WARNING, "NFQ socket closed");
+	nfq_destroy_queue(nfq_var->qh);
+	nfq_var->qh = 0;
+	nfq_close(nfq_var->h);
+	nfq_var->h = 0;
+	return -1;
+}
+
+static void nfq_thread_sig(int thread_signum)
+{
+	(void)thread_signum;
+	if (nfq_debug) log_message(LOG_DEBUG,"Thread got SIGNUM %d", thread_signum);
+}
+
+void *nfq_thread_func(void *data)
+{
+	struct sigaction act = {
+			.sa_mask = 0,
+			.sa_flags = SA_NODEFER,
+			.sa_handler = &nfq_thread_sig,
+	};
+	if (0 > sigaction(SIGUSR1,&act,NULL)) {
+		log_message(LOG_WARNING,"Singal is not set");
+	}
+
+	nfq_thread_var_t *nfq_var = (nfq_thread_var_t *)data;
+
+	while (!nfq_var->terminated)
+	{
+		if (*(nfq_var->global_conf) != nfq_var->current_conf)
+			nfq_var->current_conf = *(nfq_var->global_conf);
+		if (nfq_cycle_read(nfq_var) == -1 && !nfq_var->terminated)
+		{
+			if (nfq_init_thread(nfq_var) == -1) {
+				nfq_var->err = true;
+				break;
+			}
+		}
+	}
+	pthread_exit(NULL);
+	return 0;
+}
+
+void nfq_thread_hup(int thread_num)
+{
+	//no bounds checking
+	pthread_kill(nfq_threads[thread_num], SIGUSR1);
+}
+
+static int nfq_get_iface(int if_family, char *msgbuf, char *rcvbuf, int nlsock, int msgnum)
+{
+	nl_request_t *request;
+	struct nlmsghdr *nlmsg;
+	struct rtmsg *route_msg;
+	struct rtattr *route_attr;
+	int route_attr_len;
+	int if_idx = 0;
+
+	if ((msgbuf == NULL) || (rcvbuf == NULL) || (nlsock < 1))
+		return 0;
+	
+	const char *af_family = if_family == AF_INET ? "IPv4:" : "IPv6:";
+
+	//char *rcvptr = rcvbuf;
+	int rcvlen   = 0;
+
+	bzero(msgbuf,NL_MSG_BUFSIZE);
+	bzero(rcvbuf,NL_RCV_BUFSIZE);
+	request = (nl_request_t *)msgbuf;
+	request->nl.nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+	request->nl.nlmsg_type  = RTM_GETROUTE;
+	request->nl.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+	request->nl.nlmsg_seq   = msgnum;
+	request->nl.nlmsg_pid   = getpid();
+	
+	request->rt.rtm_family  = if_family;
+	request->rt.rtm_type    = RTN_UNICAST;
+	request->rt.rtm_table   = RT_TABLE_DEFAULT;
+	request->rt.rtm_protocol = 0;
+	if (send(nlsock, request, request->nl.nlmsg_len, 0) < 0) {
+		log_message (LOG_ERR, "%s Cannot send NETLINK message to dump routes", af_family);
+		return 0;
+	}
+	//iov.iov_base = rcvbuf;
+	//while (1) {
+	bool done = false;
+	do {
+		rcvlen = recv(nlsock, rcvbuf, NL_RCV_BUFSIZE, 0);
+		if (rcvlen < 0) {
+			log_message (LOG_ERR, "%s Cannot receive NETLINK message with routes dump", af_family);
+			break;
+		}
+		if (nfq_debug) log_message (LOG_DEBUG, "%s Received %d bytes from netlink", af_family, rcvlen);
+		for (nlmsg = (struct nlmsghdr *)rcvbuf; NLMSG_OK(nlmsg, rcvlen); nlmsg = NLMSG_NEXT(nlmsg, rcvlen))
+		{
+			if (nlmsg->nlmsg_type == NLMSG_ERROR) {
+				log_message (LOG_ERR, "%s Error in received NETLINK message", af_family);
+				done = true;
+				break;
+			}
+			if ((nlmsg->nlmsg_seq != msgnum) || (nlmsg->nlmsg_pid != getpid()))
+			{
+				if (nfq_debug) log_message (LOG_DEBUG, "%s pid or msgnum changed", af_family);
+				done = true;
+				break;
+			}
+			if (nlmsg->nlmsg_type == NLMSG_DONE) 
+			{
+				if (nfq_debug) log_message (LOG_DEBUG, "%s msg_type is DONE", af_family);
+				done = true;
+			}
+			if ((nlmsg->nlmsg_flags & NLM_F_MULTI) == 0)
+			{
+				if (nfq_debug) log_message (LOG_DEBUG, "%s msg_flags without F_MULTI", af_family);
+				done = true;
+			}
+			if (if_idx) continue; // do not check other data if we got default gw iface
+
+			route_msg = (struct rtmsg *)NLMSG_DATA(nlmsg);
+			//Skip routes not from main route table and not default gw (dst_len > 0)
+			if (nfq_debug) 
+				log_message(LOG_DEBUG,"%s rtm_table = %d, rtm_dst_len = %d,rtm_family = %d", af_family, route_msg->rtm_table, route_msg->rtm_dst_len, route_msg->rtm_family);
+			if (route_msg->rtm_table != RT_TABLE_MAIN || route_msg->rtm_dst_len != 0)
+				continue;
+			// Skip non-IPv4 routes
+			if (route_msg->rtm_family != if_family)
+				continue;
+			route_attr_len = RTM_PAYLOAD(nlmsg);
+			for (route_attr = (struct rtattr *)RTM_RTA(route_msg); RTA_OK(route_attr,route_attr_len); route_attr = RTA_NEXT(route_attr, route_attr_len))
+			{
+				if (nfq_debug)
+					log_message(LOG_DEBUG,"IPv4: rta_type = %d", route_attr->rta_type);
+
+				switch (route_attr->rta_type)
+				{
+					case RTA_OIF:
+						if_idx = *(int *)RTA_DATA(route_attr);
+						break;
+					default:
+						break;
+						
+				}
+				
+			}
+		}
+	} while (!done);
+
+	return if_idx;
+	
+}
+
+int nfq_init_int(char *ifname)
+{
 	struct {
 		int pkt_family, dst_family;
 	} map[] = {
@@ -122,8 +344,177 @@ int nfq_init(int qnum)
 	}, *p;
 	struct sockaddr_storage *bind_to;
 	int s;
-	for (p = map; p->pkt_family != 0; p++)
+	//first try to find address to bind if not explicitly set
+	if ((bind4.ss_family != AF_INET) || ((bind6.ss_family != AF_INET6))) 
 	{
+		int nlsock = -1;
+		struct timeval tv = {1,0};
+		int msgnum = 0;
+		struct sockaddr_nl nl_sock_addr;
+
+		int ipv4_ifindex = 0, ipv6_ifindex = 0;
+		if (*ifname) {
+			if (!(ipv4_ifindex = ipv6_ifindex = if_nametoindex(ifname)))
+			{
+				log_message (LOG_ERR, "Interface %s is not found in system", ifname);
+				perror("interface unknown");
+				return -1;
+			}
+		}
+	    if ((nlsock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)) < 0) {
+			log_message (LOG_WARNING, "Cannot get netlink socket, cannot find default gateway interface");
+        	goto opensockets;
+		}
+		setsockopt(nlsock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		char *msgbuf = MALLOC(NL_MSG_BUFSIZE);
+		char *rcvbuf = MALLOC(NL_RCV_BUFSIZE);
+
+		bzero(&nl_sock_addr, sizeof(nl_sock_addr));
+		nl_sock_addr.nl_pid = getpid();
+		nl_sock_addr.nl_family = AF_NETLINK;
+		bind(s, (struct sockaddr *)&nl_sock_addr, sizeof(nl_sock_addr));
+						
+		if (!ipv4_ifindex) {
+			log_message(LOG_DEBUG, "msgnum %d", msgnum);
+			ipv4_ifindex = nfq_get_iface(AF_INET, msgbuf, rcvbuf, nlsock, msgnum);
+			msgnum++;			
+		}
+		if (bind4.ss_family != AF_INET) log_message (LOG_INFO, "Index of IPv4 default gateway interface: %d", ipv4_ifindex);
+
+		if (!ipv6_ifindex)
+		{
+			log_message(LOG_DEBUG, "msgnum %d", msgnum);
+			ipv6_ifindex = nfq_get_iface(AF_INET6, msgbuf, rcvbuf, nlsock, msgnum);
+			msgnum++;			
+			
+		}
+		if (bind6.ss_family != AF_INET6) log_message (LOG_INFO, "Index of IPv6 default gateway interface: %d", ipv6_ifindex);
+
+		if ((ipv4_ifindex && bind4.ss_family != AF_INET) || (ipv6_ifindex && bind6.ss_family != AF_INET6)) {
+			bzero(msgbuf,NL_MSG_BUFSIZE);
+			bzero(rcvbuf,NL_RCV_BUFSIZE);
+			struct ifaddrmsg *ifa_msg;
+			struct rtattr *ifa_attr;
+			nl_request_t *request = (nl_request_t *)msgbuf;
+			char *rcvptr;
+			int rcvlen;
+			request->nl.nlmsg_len   = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+			request->nl.nlmsg_type  = RTM_GETADDR;
+			request->nl.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+			request->nl.nlmsg_seq   = msgnum;
+			request->nl.nlmsg_pid   = getpid();
+
+			if (send(nlsock, (void *)request, request->nl.nlmsg_len, 0) < 0) {
+				log_message (LOG_ERR, "Cannot send NETLINK message to dump interface addresses");
+				goto err_free;
+			}
+			struct nlmsghdr *nlmsg;
+			bool done = false;
+			do {
+				int rcvlen = recv(nlsock, rcvbuf, NL_RCV_BUFSIZE, 0);
+				if (rcvlen < 0) {
+					log_message (LOG_ERR, "Cannot receive NETLINK message with interface addresses");
+					break;
+				}
+				for (nlmsg = (struct nlmsghdr *)rcvbuf; NLMSG_OK(nlmsg, rcvlen); nlmsg = NLMSG_NEXT(nlmsg, rcvlen))
+				{
+					if (nlmsg->nlmsg_type == NLMSG_ERROR) {
+						log_message (LOG_ERR, "Error in received NETLINK message (dump iface addresses)");
+						done = true;
+						break;
+					}
+					if ((nlmsg->nlmsg_seq != msgnum) || (nlmsg->nlmsg_pid != getpid())) {
+						log_message (LOG_ERR, "msgnum or pid changed (dump iface addresses)");
+						done = true;
+						break;
+					}
+					if ((nlmsg->nlmsg_type == NLMSG_DONE) || ((nlmsg->nlmsg_flags & NLM_F_MULTI) == 0)) {
+						done = true;
+						break;
+					}
+					
+					// dump all data from netlink if we know all needed info
+					if ((!ipv4_ifindex || bind4.ss_family == AF_INET) && (!ipv6_ifindex || bind6.ss_family == AF_INET6)) continue;
+
+					ifa_msg = (struct ifaddrmsg *)NLMSG_DATA(nlmsg);
+					if (nfq_debug)
+						log_message(LOG_DEBUG, "IFA_MSG: family = %d, ifindex = %d, scope = %d", ifa_msg->ifa_family, ifa_msg->ifa_index, ifa_msg->ifa_scope);
+					if (bind4.ss_family != AF_INET && ipv4_ifindex && ifa_msg->ifa_index == ipv4_ifindex && 
+						ifa_msg->ifa_family == AF_INET  && ifa_msg->ifa_scope == RT_SCOPE_UNIVERSE)
+					{
+						int ifa_attr_len = IFA_PAYLOAD(nlmsg);
+						bool found = false;
+						for (ifa_attr = (struct rtattr *)IFA_RTA(ifa_msg); RTA_OK(ifa_attr,ifa_attr_len); ifa_attr = RTA_NEXT(ifa_attr, ifa_attr_len))
+						{
+							if (nfq_debug)
+								log_message(LOG_DEBUG,"IFA_MSG: attribute type = %d", ifa_attr->rta_type);
+							switch (ifa_attr->rta_type)
+							{
+								case IFA_LOCAL:
+								case IFA_ADDRESS:
+									{
+									bind4.ss_family = AF_INET;
+									struct sockaddr_in *addr = (struct sockaddr_in *)&bind4;
+									addr->sin_addr = *(struct in_addr *)RTA_DATA(ifa_attr);
+									found = true;
+									}
+									break;
+								default:
+									break;
+									
+							}
+							if (found) break;
+							
+						}
+					}
+					if (bind6.ss_family != AF_INET6 && ipv6_ifindex && ifa_msg->ifa_index == ipv6_ifindex && 
+						ifa_msg->ifa_family == AF_INET6  && ifa_msg->ifa_scope == RT_SCOPE_UNIVERSE)
+					{
+						int ifa_attr_len = IFA_PAYLOAD(nlmsg);
+						bool found = false;
+						for (ifa_attr = (struct rtattr *)IFA_RTA(ifa_msg); RTA_OK(ifa_attr,ifa_attr_len); ifa_attr = RTA_NEXT(ifa_attr, ifa_attr_len))
+						{
+							if (nfq_debug)
+								log_message(LOG_DEBUG,"IFA_MSG: attribute type = %d", ifa_attr->rta_type);
+							switch (ifa_attr->rta_type)
+							{
+								case IFA_LOCAL:
+								case IFA_ADDRESS:
+									{
+									bind6.ss_family = AF_INET6;
+									struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&bind6;
+									addr->sin6_addr = *((struct in6_addr *)RTA_DATA(ifa_attr));
+									found = true;
+									}
+									break;
+								default:
+									break;
+									
+							}
+							if (found) break;
+						}
+					}
+
+				}
+			} while (!done);
+
+		}
+err_free:
+		FREE(msgbuf);
+		FREE(rcvbuf);
+		close(nlsock);
+
+	}
+	{
+		char str[INET6_ADDRSTRLEN];
+		log_message (LOG_INFO, "Binding IPv4 socket to %s", inet_ntoa((*(struct sockaddr_in*)&bind4).sin_addr));
+		inet_ntop(AF_INET6, &(*(struct sockaddr_in6 *)&bind6).sin6_addr,str,INET6_ADDRSTRLEN);
+		log_message (LOG_INFO, "Binding IPv6 socket to %s", str);
+	}
+
+opensockets:
+	for (p = map; p->pkt_family != 0; p++)
+	{ 
 		s = socket (p->dst_family, SOCK_RAW, (p->pkt_family == AF_INET ? IPPROTO_IPIP : IPPROTO_IPV6));
 		if (s < 0)
 		{
@@ -153,76 +544,55 @@ int nfq_init(int qnum)
 
 		*get_raw_sock(p->pkt_family, p->dst_family) = s;
 	}
-
-	h = nfq_open();
-	if (!h) {
-		log_message (LOG_ERR, "nfq_open() error");
-		return -1;
-	}
-
-	if (nfq_unbind_pf(h, AF_INET) < 0) {
-		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET) error: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_bind_pf(h, AF_INET) < 0) {
-		log_message (LOG_ERR, "nfq_bind_pf(AF_INET) error: %s", strerror(errno));
-		return -1;
-	}
-
-	if (nfq_unbind_pf(h, AF_INET6) < 0) {
-		log_message (LOG_ERR, "nfq_unbind_pf(AF_INET6) error: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_bind_pf(h, AF_INET6) < 0) {
-		log_message (LOG_ERR, "nfq_bind_pf(AF_INET6) error: %s", strerror(errno));
-		return -1;
-	}
-
-	qh = nfq_create_queue(h, qnum, &cb, NULL);
-	if (!qh) {
-		log_message (LOG_ERR, "nfq_create_queue() error: %s", strerror(errno));
-		return -1;
-	}
-
-	if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
-		log_message (LOG_ERR, "nfq_set_mode(NFQNL_COPY_PACKET) error: %s", strerror(errno));
-		return -1;
-	}
-
-	fd = nfq_fd(h);
-
-#if defined SOL_NETLINK && defined NETLINK_NO_ENOBUFS
-	if (setsockopt(fd, SOL_NETLINK, NETLINK_NO_ENOBUFS, (int[]){1}, sizeof(int)) < 0) {
-		log_message (LOG_ERR, "Unable to setsockopt NETLINK_NO_ENOBUFS: %s", strerror(errno));
-		return -1;
-	}
-	if (nfq_debug)
-		log_message(LOG_DEBUG, "set NETLINK_NO_ENOBUFS mode");
-#endif
-
 	return 0;
 }
 
-int nfq_cycle_read(ct_conf_t * conf)
+int nfq_init_th(int thnum, nfq_thread_var_t *nfq_vars)
 {
-	current_conf = conf;
-	int rv = recv(fd, buf, sizeof(buf), 0);
-	if (rv > 0)
+	pthread_attr_t attr;
+	cpu_set_t cpuset;
+	int cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+	int started_threads = 0;
+	// opening raw sockets
+	nfq_threads = MALLOC(thnum * sizeof(pthread_t));
+	pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+	for (; started_threads < thnum; started_threads++, nfq_vars++)
 	{
-		if (nfq_debug)
-			log_message (LOG_DEBUG, "got %d bytes from netlink", rv);
-		nfq_handle_packet(h, buf, rv);
-		return 0;
+		if (nfq_init_thread(nfq_vars) == -1)
+			goto error;
+		pthread_create(&nfq_threads[started_threads], &attr, nfq_thread_func, (void *)nfq_vars);
+		if (nfq_vars->cpu_affinity)
+		{
+			CPU_ZERO(&cpuset);
+			CPU_SET(nfq_vars->thread_num % cpu_count, &cpuset);
+			if (pthread_setaffinity_np(nfq_threads[started_threads], sizeof(cpu_set_t), &cpuset))
+			{
+				log_message (LOG_WARNING, "Thread %d: Couldn't set cpu_affinity", started_threads);
+			}
+		}
 	}
-	else if (rv == -1)
-	{
-		if (errno == EINTR)
-			return 0;
-		log_message (LOG_WARNING, "recv: %s", strerror (errno));
+	pthread_attr_destroy(&attr);
+	return 0;
+error:
+	pthread_attr_destroy(&attr);
+	void *status;
+	while(started_threads) {
+		started_threads--;
+		nfq_vars--;
+		nfq_vars->terminated = true;
+		pthread_join(nfq_threads[started_threads], &status);
 	}
-	else // rv == 0
-		log_message (LOG_WARNING, "NFQ socket closed");
-	nfq_destroy_queue(qh);
-	nfq_close(h);
 	return -1;
+}
+
+int nfq_done(int numth, nfq_thread_var_t *nfq_vars)
+{
+	void *status;
+	for (int i = 0; i < numth; i++, nfq_vars++) {
+		if (nfq_vars->err) continue;
+		nfq_vars->terminated = true;
+		pthread_join(nfq_threads[i], &status);
+	}
+	return 0;
 }

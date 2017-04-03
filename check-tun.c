@@ -27,6 +27,8 @@
 #include <signal.h>
 #include <limits.h>
 #include <sys/socket.h>
+#include <time.h>
+#include <net/if.h>
 
 #include "config.h"
 #include "nfq.h"
@@ -34,10 +36,15 @@
 
 static int opt_d = 0;
 static int opt_q = 0;
+static int opt_th = 1;
+static bool opt_a = false;
 static char *conf_file;
 static char *pid_file;
 static char abs_pid_file[PATH_MAX];
+static char ifname[IF_NAMESIZE];
+
 static ct_conf_t *conf;
+static ct_conf_t *oldconf = NULL;
 static int update_conf_flag = 0;
 static int opt_dump_conf = 0;
 static FILE* pidf = NULL;
@@ -52,6 +59,8 @@ static sighandler_t sig_table[NSIG] = {
 	[SIGHUP]  = &hup_handler,
 };
 
+static nfq_thread_var_t *nfq_thread_vars = NULL;
+
 static void
 usage (char *progname, int exit_code)
 {
@@ -63,8 +72,12 @@ usage (char *progname, int exit_code)
 "  -C     Dump parsed config and exit\n"
 "  -b     Source IP address. Could be multiple, for inet and inet6\n"
 "  -p     create pid file with specified name\n"
-"  -q     use specified nfqueue number. Default is 0\n"
+"  -t     create specified threads number. Default is 1\n"
+"  -q     use specified nfqueue start number. Default is 0\n"
+"         each thread uses its own queue (start number + thread num)\n"
 "  -f     keepalived config file path\n"
+"  -a     set cpu_affinity for worker threads and bind to cpus from 0 to thread num\n"
+"  -i     set interface to bind\n"
 , progname);
 	exit(exit_code);
 }
@@ -99,12 +112,12 @@ static int main0 (int argc, char **argv)
 {
 	log_console = 1;
 	log_syslog = 0;
-
+	bzero(ifname, sizeof(ifname));
 	// parse options
 	char c;
 	if (argc == 1)
 		usage(argv[0], 1);
-	while (-1 != (c = getopt(argc, argv, "hdDCf:b:p:q:")))
+	while (-1 != (c = getopt(argc, argv, "ahdDCf:b:p:q:t:i:")))
 		switch (c)
 		{
 			case 'h':
@@ -150,6 +163,16 @@ static int main0 (int argc, char **argv)
 			case 'q':
 				opt_q = atoi (optarg);
 				break;
+			case 't':
+				opt_th = atoi (optarg);
+				break;
+			case 'a':
+				opt_a = true;
+				break;
+			case 'i':
+				strncpy(ifname,optarg,IF_NAMESIZE);
+				ifname[IF_NAMESIZE-1]=0;
+				break;
 			default:
 				return 1;
 		}
@@ -183,10 +206,6 @@ static int main0 (int argc, char **argv)
 				return 1;
 			}
 		}
-
-	// init sockets
-	if (nfq_init(opt_q))
-		return 1;
 
 	// open pid fh
 	if (pid_file != NULL)
@@ -223,8 +242,35 @@ static int main0 (int argc, char **argv)
 		fclose (pidf);
 	}
 
+	log_message (LOG_INFO, "Initializing threads");
+	// init thread-specific variables
+	nfq_thread_vars = MALLOC(opt_th * sizeof(nfq_thread_var_t));
+	if (!nfq_thread_vars)
+	{
+		delete_pid_file();
+		perror("no memory for threads");
+		return 1;
+	}
+
+	for (int i = 0; i < opt_th; i++)
+	{
+		nfq_thread_vars[i].nfq_q_num = opt_q + i;
+		nfq_thread_vars[i].thread_num = i;
+		nfq_thread_vars[i].current_conf = conf;
+		nfq_thread_vars[i].global_conf = &conf;
+		nfq_thread_vars[i].cpu_affinity = opt_a;
+	}
+	// init sockets
+	nfq_init_int(ifname);
+	if (nfq_init_th(opt_th, nfq_thread_vars))
+	{
+		delete_pid_file();
+		perror("threads start error");
+		return 1;
+	}
 	log_message (LOG_INFO, "started listening");
 
+	struct timespec tm = {0, 100000};
 	// main loop
 	for (;;)
 	{
@@ -236,20 +282,24 @@ static int main0 (int argc, char **argv)
 			new_conf = read_configuration (conf_file);
 			if (new_conf)
 			{
-				free_conf(conf);
+				oldconf = conf;
 				conf = new_conf;
 			}
+			bool conf_updated = false;
+			while (!conf_updated)
+			{
+				conf_updated = true;
+				for (int i = 0; i < opt_th && conf_updated; i++)
+				{
+					conf_updated &= (conf == nfq_thread_vars[i].current_conf);
+					if (!(conf == nfq_thread_vars[i].current_conf)) nfq_thread_hup(i);
+				}
+				nanosleep(&tm, NULL);
+			}
+			free_conf(oldconf);
 		}
+		nanosleep(&tm, NULL);
 
-		// process packets
-		if (nfq_cycle_read(conf) != 0)
-		{
-			// try to re-init NFQUEUE
-			sleep(1);
-			log_message (LOG_WARNING, "trying to re-init NFQUEUE");
-			if (nfq_init(opt_q))
-				return 1;
-		}
 	}
 
 	return 0;
