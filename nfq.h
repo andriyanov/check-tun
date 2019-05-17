@@ -27,6 +27,11 @@
 #include "keepalived/utils.h"
 #include "keepalived/memory.h"
 
+struct gre_base_hdr {
+	__be16 flags;
+	__be16 protocol;
+} __packed;
+
 typedef struct nfq_thread_var {
     unsigned int nfq_q_num;
     unsigned int thread_num;

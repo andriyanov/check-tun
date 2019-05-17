@@ -26,7 +26,27 @@
 
 #define CT_HSIZE (2 << 7)
 
-struct ct_head;
+#define CT_HASH(I) ((unsigned int)(I)%CT_HSIZE)
+
+#define IP_VS_CONN_F_MASQ       0x0000          /* masquerading/NAT */
+#define IP_VS_CONN_F_LOCALNODE  0x0001          /* local node */
+#define IP_VS_CONN_F_TUNNEL     0x0002          /* tunneling */
+#define IP_VS_CONN_F_DROUTE     0x0003          /* direct routing */
+#define IP_VS_CONN_F_BYPASS     0x0004          /* cache bypass */
+#define IP_VS_CONN_F_GRE_TUNNEL 0x0005          /* GRE tunneling */
+
+
+struct ct_pair {
+	unsigned int fwmark;
+	struct sockaddr_storage dst;
+	int lvs_method;
+	LIST_ENTRY(ct_pair) next;
+};
+
+struct ct_head {
+	LIST_HEAD(ct_hentry, ct_pair) ptr;
+};
+
 
 typedef struct ct_conf
 {
@@ -40,6 +60,6 @@ extern void free_conf (ct_conf_t *conf);
 extern ct_conf_t *read_configuration(char *conf_file);
 extern void dump_conf (ct_conf_t *conf);
 
-extern struct sockaddr_storage *lookup_dest (ct_conf_t *conf, unsigned int fwmark);
+extern struct ct_pair *lookup_dest (ct_conf_t *conf, unsigned int fwmark);
 
 #endif

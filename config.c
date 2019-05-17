@@ -22,21 +22,12 @@
 #include "memory.h"
 #include "parser.h"
 #include "utils.h"
-
-#define CT_HASH(I) ((unsigned int)(I)%CT_HSIZE)
-
-struct ct_pair {
-	unsigned int fwmark;
-	struct sockaddr_storage dst;
-	LIST_ENTRY(ct_pair) next;
-};
-
-struct ct_head {
-	LIST_HEAD(ct_hentry, ct_pair) ptr;
-};
+#include "logger.h"
 
 static ct_conf_t * current_conf;
 static struct ct_pair curr_rs;
+
+static int lvs_method;
 
 ct_conf_t *
 alloc_conf(void)
@@ -66,7 +57,7 @@ free_conf (ct_conf_t *conf)
 }
 
 static void
-add_dest (ct_conf_t *conf, unsigned int fwmark, const struct sockaddr_storage *dst)
+add_dest (ct_conf_t *conf, unsigned int fwmark, const struct sockaddr_storage *dst, int lvs)
 {
 	struct ct_head *head = conf->htable[CT_HASH(fwmark)];
 	if (head == NULL)
@@ -78,10 +69,11 @@ add_dest (ct_conf_t *conf, unsigned int fwmark, const struct sockaddr_storage *d
 	struct ct_pair *pair = MALLOC(sizeof (struct ct_pair));
 	pair->fwmark = fwmark;
 	pair->dst = *dst;
+	pair->lvs_method = lvs;
 	LIST_INSERT_HEAD(&head->ptr, pair, next);
 }
 
-struct sockaddr_storage *
+struct ct_pair *
 lookup_dest (ct_conf_t *conf, unsigned int fwmark)
 {
 	struct ct_pair *p;
@@ -89,15 +81,15 @@ lookup_dest (ct_conf_t *conf, unsigned int fwmark)
 	if (head != NULL)
 		for (p = head->ptr.lh_first; p != NULL; p = p->next.le_next)
 			if (p->fwmark == fwmark)
-				return &p->dst;
+				return p;
 	return NULL;
 }
 
 static void
 finalize_rs (struct ct_pair *pair)
 {
-	if (pair->fwmark && pair->dst.ss_family != AF_UNSPEC)
-		add_dest (current_conf, pair->fwmark, &pair->dst);
+	if (pair->fwmark && pair->dst.ss_family != AF_UNSPEC && lvs_method > 1)
+		add_dest (current_conf, pair->fwmark, &pair->dst, lvs_method);
 	pair->dst.ss_family = AF_UNSPEC;
 	pair->fwmark = 0;
 }
@@ -123,6 +115,23 @@ static void fwmark_handler (vector_t *strvec)
 	curr_rs.fwmark = atoi (vector_slot (strvec, 1));
 }
 
+static void
+lbkind_handler(vector_t *strvec)
+{
+    char *str = vector_slot(strvec, 1);
+
+	if (!strcmp(str, "NAT"))
+		lvs_method = IP_VS_CONN_F_MASQ;
+	else if (!strcmp(str, "DR"))
+		lvs_method = IP_VS_CONN_F_DROUTE;
+	else if (!strcmp(str, "TUN"))
+		lvs_method = IP_VS_CONN_F_TUNNEL;
+	else if (!strcmp(str, "GRE"))
+		lvs_method = IP_VS_CONN_F_GRE_TUNNEL;
+	else
+		log_message(LOG_INFO, "PARSER : unknown [%s] routing method.", str);
+}
+
 static vector_t *
 check_init_keywords(void)
 {
@@ -136,6 +145,7 @@ check_init_keywords(void)
 
 	/* Virtual server mapping */
 	install_keyword_root("virtual_server", NULL);
+	install_keyword("lvs_method", &lbkind_handler);
 	install_keyword("real_server", &rs_handler);
 	install_sublevel();
 
@@ -161,6 +171,7 @@ read_configuration(char *conf_file)
 	current_stream = NULL;
 	current_conf = alloc_conf();
 	init_data (conf_file, &check_init_keywords);
+	lvs_method = 0;
 	finalize_rs (&curr_rs);
 
 	if (current_stream == NULL)

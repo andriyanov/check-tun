@@ -29,6 +29,7 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/ether.h>
 #include <linux/netfilter.h>	    /* for NF_DROP */
 #include <net/if.h>
 
@@ -48,9 +49,9 @@ static uint16_t get_packet_family (void* packet)
 	byte >>= 4;
 	switch (byte) {
 		case 4:
-			return AF_INET;
+			return IPPROTO_IPIP;
 		case 6:
-			return AF_INET6;
+			return IPPROTO_IPV6;
 	}
 	return AF_UNSPEC;
 }
@@ -59,7 +60,7 @@ static inline int *
 get_raw_sock (int pkt_family, int dst_family)
 {
 	return &raw_socks
-		[pkt_family == AF_INET ? 0 : 1]
+		[pkt_family == IPPROTO_IPIP ? 0 : pkt_family == IPPROTO_IPV6 ? 1 : 2]
 		[dst_family == AF_INET ? 0 : 1];
 }
 
@@ -71,7 +72,12 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 	unsigned int mark;
 	struct nfqnl_msg_packet_hdr *ph;
 	struct sockaddr_storage *dst;
+	struct ct_pair *ct;
 	unsigned char *pkt;
+	struct iovec iov[2] = {};
+	size_t iovcnt = 0;
+	struct msghdr msg = {};
+	struct gre_base_hdr greh = {};
 
 	ph = nfq_get_msg_packet_hdr(nfa);
 	id = ntohl(ph->packet_id);
@@ -80,21 +86,36 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 	int pkt_fam = get_packet_family (pkt);
 	int sent;
 
-	dst = lookup_dest (nfq_var->current_conf, mark);
-	if (dst == NULL)
+	ct = lookup_dest (nfq_var->current_conf, mark);
+	if (ct == NULL)
 	{
 		if (nfq_debug)
 			log_message (LOG_DEBUG, "can't find destination for fwmark %d", mark);
 	}
 	else
 	{
-		sent = sendto (
+		if (ct->lvs_method == IP_VS_CONN_F_GRE_TUNNEL) {
+			greh.protocol = pkt_fam == IPPROTO_IPIP ? htons(ETH_P_IP) : htons(ETH_P_IPV6);
+			iov[iovcnt].iov_base = &greh;
+			iov[iovcnt].iov_len = sizeof(greh);
+			++iovcnt;
+			pkt_fam = IPPROTO_GRE;
+		}
+		iov[iovcnt].iov_base = &pkt;
+		iov[iovcnt].iov_len = pkt_len;
+		++iovcnt;
+
+		msg.msg_iov = iov;
+		msg.msg_iovlen = iovcnt;
+		msg.msg_name = dst;
+		msg.msg_namelen = sizeof (*dst);
+		
+		dst = &ct->dst;
+		
+		sent = sendmsg (
 			*get_raw_sock (pkt_fam, dst->ss_family),
-			pkt,
-			pkt_len,
-			0,
-			(struct sockaddr*)dst,
-			sizeof (*dst)
+			&msg,
+			0
 		);
 		if (nfq_debug)
 		{
@@ -235,10 +256,12 @@ int nfq_init_int(char *ifname)
 	struct {
 		int pkt_family, dst_family;
 	} map[] = {
-		{ AF_INET , AF_INET  },
-		{ AF_INET , AF_INET6 },
-		{ AF_INET6, AF_INET  },
-		{ AF_INET6, AF_INET6 },
+		{ IPPROTO_IPIP, AF_INET  },
+		{ IPPROTO_IPIP, AF_INET6 },
+		{ IPPROTO_IPV6, AF_INET  },
+		{ IPPROTO_IPV6, AF_INET6 },
+		{ IPPROTO_GRE,  AF_INET  },
+		{ IPPROTO_GRE,  AF_INET6 },
 		{ 0       , 0        }
 	}, *p;
 	struct sockaddr_storage *bind_to;
@@ -293,7 +316,7 @@ int nfq_init_int(char *ifname)
 opensockets:
 	for (p = map; p->pkt_family != 0; p++)
 	{ 
-		s = socket (p->dst_family, SOCK_RAW, (p->pkt_family == AF_INET ? IPPROTO_IPIP : IPPROTO_IPV6));
+		s = socket (p->dst_family, SOCK_RAW, p->pkt_family);
 		if (s < 0)
 		{
 			perror ("socket(SOCK_RAW)");
