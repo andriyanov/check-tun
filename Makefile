@@ -3,6 +3,7 @@ override CFLAGS += -std=gnu99 -D_GNU_SOURCE
 override LDLIBS += -lnetfilter_queue -lpthread
 
 OBJECTS += check-tun.o
+OBJECTS += netlink.o
 OBJECTS += nfq.o
 OBJECTS += config.o
 OBJECTS += keepalived/parser.o
